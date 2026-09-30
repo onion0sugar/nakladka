@@ -98,6 +98,46 @@ def test_failed_publish_retries_same_user_after_next_send_cycle():
     connection.close()
 
 
+def test_retry_reselects_user_when_fresh_poll_removes_group_eligibility():
+    connection, dispatcher = make_dispatcher()
+    first = offer_actions(
+        dispatcher.advance([(1, "ORDER-1", 2)], {"old-user"}, {"old-user": 2}, set(), now=10)
+    )[0]
+
+    retry = offer_actions(
+        dispatcher.advance(
+            [(1, "ORDER-1", 2)],
+            {"old-user", "new-user"},
+            {"new-user": 2},
+            set(),
+            now=11,
+        )
+    )[0]
+
+    assert retry.user_topic == "new-user"
+    connection.close()
+
+
+def test_retry_reselects_user_when_fresh_poll_marks_candidate_busy():
+    connection, dispatcher = make_dispatcher()
+    first = offer_actions(
+        dispatcher.advance([(1, "ORDER-1", 2)], {"old-user"}, {"old-user": 2}, set(), now=10)
+    )[0]
+
+    retry = offer_actions(
+        dispatcher.advance(
+            [(1, "ORDER-1", 2)],
+            {"old-user", "new-user"},
+            {"old-user": 2, "new-user": 2},
+            {"old-user"},
+            now=11,
+        )
+    )[0]
+
+    assert retry.user_topic == "new-user"
+    connection.close()
+
+
 def test_full_round_emits_supervisor_action_then_starts_a_new_round(monkeypatch):
     connection, dispatcher = make_dispatcher()
     monkeypatch.setattr("dispatch.random.shuffle", lambda users: users.reverse())

@@ -181,17 +181,28 @@ class OrderDispatcher:
                 continue
 
             if status == "retry" and candidate:
-                if retry_at is not None and now < retry_at:
-                    continue
-                if candidate in database_busy:
-                    continue
                 allocation_owner = allocations.get(candidate)
-                if allocation_owner not in (None, order_id):
+                if (
+                    candidate in candidates
+                    and candidate not in database_busy
+                    and allocation_owner in (None, order_id)
+                ):
+                    if retry_at is not None and now < retry_at:
+                        continue
+                    actions.append(
+                        DispatchAction("offer", order_id, number, group_id, candidate, round_number)
+                    )
                     continue
-                actions.append(
-                    DispatchAction("offer", order_id, number, group_id, candidate, round_number)
+
+                self.connection.execute(
+                    "UPDATE order_dispatch SET status='pending', candidate_user=NULL, "
+                    "retry_at=NULL WHERE order_id=?",
+                    (order_id,),
                 )
-                continue
+                if allocation_owner == order_id:
+                    allocations.pop(candidate, None)
+                status = "pending"
+                candidate = None
 
             round_users = [user for user in self._decode(round_users_json) if user in candidates]
             round_users.extend(user for user in candidates if user not in round_users)
