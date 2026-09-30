@@ -104,7 +104,7 @@ async def run_service(
 
     dispatcher = OrderDispatcher(state)
     latest_orders: list[tuple[int | None, str, int | None]] = []
-    latest_accepted_order_ids: set[int] = set()
+    latest_accepted_orders: dict[int, str] = {}
     latest_busy: set[str] = set()
     latest_work_today: dict[str, int] = {}
     latest_ready_messages: list[tuple[str, str, str, str, str | None]] = []
@@ -136,7 +136,7 @@ async def run_service(
         task.add_done_callback(background_publish_tasks.discard)
 
     async def poll_loop() -> None:
-        nonlocal db, latest_orders, latest_accepted_order_ids, latest_busy, latest_ready_messages
+        nonlocal db, latest_orders, latest_accepted_orders, latest_busy, latest_ready_messages
         nonlocal latest_work_today, latest_ready_targets, snapshot_at
         while not stop.is_set():
             try:
@@ -226,8 +226,8 @@ async def run_service(
                         ],
                         key=lambda order: (order[0] is None, order[0] or 0, order[1]),
                     )
-                    latest_accepted_order_ids = {
-                        row.doc_id
+                    latest_accepted_orders = {
+                        row.doc_id: str(row.user_name or "nieznany użytkownik")
                         for row in courier_rows
                         if row.doc_id is not None
                         and row.document_type == "7"
@@ -321,35 +321,24 @@ async def run_service(
             previous_ready_targets = dict(latest_ready_targets)
 
     async def publish_dispatch_action(action: DispatchAction) -> None:
-        if action.kind == "new":
-            if cfg.send_text:
-                click_url = ORDER_URL.format(action.order_id)
-                schedule_publish(
-                    cfg.supervisor_topic,
-                    f"Nowe zamówienie: {action.order_number} (grupa: {action.zone_group_id}).",
-                    "Nowe zamówienie",
-                    "high",
-                    click_url,
-                )
-            return
         if action.kind in {"dismiss", "expired", "accepted"}:
             if action.user_topic:
                 payload = json.dumps({"type": "dismiss", "order_id": action.order_id})
                 schedule_publish(action.user_topic, payload, "Oferta zamknięta", "min")
-            if action.kind == "expired":
+            if action.kind == "accepted" and cfg.send_text:
+                rejected = ", ".join(
+                    f"{user}: {count}" for user, count in action.rejected_counts
+                ) or "brak"
+                expired = ", ".join(
+                    f"{user}: {count}" for user, count in action.expired_counts
+                ) or "brak"
                 schedule_publish(
                     cfg.supervisor_topic,
-                    f"Czas minął dla oferty zamówienia {action.order_number} "
-                    f"u użytkownika {action.user_topic}; przekazuję dalej.",
-                    "Oferta wygasła",
-                    "high",
-                )
-            elif action.kind == "accepted":
-                recipient = f" przez {action.user_topic}" if action.user_topic else ""
-                schedule_publish(
-                    cfg.supervisor_topic,
-                    f"Zamówienie {action.order_number} zostało przyjęte{recipient}.",
-                    "Zamówienie przyjęte",
+                    f"Zamówienie {action.order_number} przyjął "
+                    f"{action.accepted_by or 'nieznany użytkownik'}. "
+                    f"Przypisania: {action.assignment_count}; odmowy: {rejected}; "
+                    f"brak odpowiedzi w czasie: {expired}.",
+                    "Podsumowanie zamówienia",
                     "high",
                 )
             return
@@ -386,7 +375,7 @@ async def run_service(
                 latest_work_today,
                 latest_busy,
                 now=time.time(),
-                accepted_order_ids=latest_accepted_order_ids,
+                accepted_orders=latest_accepted_orders,
             )
             offers = [action for action in actions if action.kind == "offer"]
             for action in actions:
@@ -440,18 +429,8 @@ async def run_service(
                         logger.info("Ignoring stale rejection for order %s from %s", order_id, user_topic)
                         continue
                     dispatch_wakeup.set()
-                    order_number = next(
-                        (number for doc_id, number, _group in latest_orders if doc_id == order_id),
-                        str(order_id),
-                    )
                     dismissal = json.dumps({"type": "dismiss", "order_id": order_id})
                     schedule_publish(user_topic, dismissal, "Oferta odrzucona", "min")
-                    schedule_publish(
-                        cfg.supervisor_topic,
-                        f"Użytkownik {user_topic} odrzucił zamówienie {order_number}.",
-                        "Odrzucone zamówienie",
-                        "high",
-                    )
                 retry_delay = RESPONSE_POLL_INTERVAL
                 await _sleep_until(stop, RESPONSE_POLL_INTERVAL)
             except NtfyError as exc:

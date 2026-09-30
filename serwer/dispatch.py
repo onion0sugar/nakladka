@@ -20,6 +20,10 @@ class DispatchAction:
     zone_group_id: int
     user_topic: str | None = None
     round_number: int = 0
+    accepted_by: str | None = None
+    assignment_count: int = 0
+    rejected_counts: tuple[tuple[str, int], ...] = ()
+    expired_counts: tuple[tuple[str, int], ...] = ()
 
 
 class OrderDispatcher:
@@ -33,14 +37,43 @@ class OrderDispatcher:
             "zone_group_id INTEGER NOT NULL, round_number INTEGER NOT NULL DEFAULT 1, "
             "round_users TEXT NOT NULL DEFAULT '[]', attempted_users TEXT NOT NULL DEFAULT '[]', "
             "status TEXT NOT NULL DEFAULT 'pending', candidate_user TEXT, retry_at REAL, "
-            "active_user TEXT, offered_at REAL, next_offer_at REAL NOT NULL DEFAULT 0)"
+            "active_user TEXT, offered_at REAL, next_offer_at REAL NOT NULL DEFAULT 0, "
+            "assignment_count INTEGER NOT NULL DEFAULT 0, "
+            "rejected_counts TEXT NOT NULL DEFAULT '{}', "
+            "expired_counts TEXT NOT NULL DEFAULT '{}')"
         )
+        columns = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(order_dispatch)")
+        }
+        if "assignment_count" not in columns:
+            self.connection.execute(
+                "ALTER TABLE order_dispatch ADD COLUMN assignment_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "rejected_counts" not in columns:
+            self.connection.execute(
+                "ALTER TABLE order_dispatch ADD COLUMN rejected_counts TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "expired_counts" not in columns:
+            self.connection.execute(
+                "ALTER TABLE order_dispatch ADD COLUMN expired_counts TEXT NOT NULL DEFAULT '{}'"
+            )
         self.connection.commit()
 
     @staticmethod
     def _decode(value: str | None) -> list[str]:
         decoded = json.loads(value or "[]")
         return [str(item) for item in decoded] if isinstance(decoded, list) else []
+
+    @staticmethod
+    def _decode_counts(value: str | None) -> dict[str, int]:
+        decoded = json.loads(value or "{}")
+        if not isinstance(decoded, dict):
+            return {}
+        return {
+            str(user): int(count)
+            for user, count in decoded.items()
+            if isinstance(count, int) and count > 0
+        }
 
     def busy_users(self) -> set[str]:
         rows = self.connection.execute(
@@ -56,6 +89,16 @@ class OrderDispatcher:
             "WHERE order_id=? AND status='offered' AND active_user=?",
             (now, order_id, user_topic),
         )
+        if cursor.rowcount == 1:
+            row = self.connection.execute(
+                "SELECT rejected_counts FROM order_dispatch WHERE order_id=?", (order_id,)
+            ).fetchone()
+            counts = self._decode_counts(row[0] if row else None)
+            counts[user_topic] = counts.get(user_topic, 0) + 1
+            self.connection.execute(
+                "UPDATE order_dispatch SET rejected_counts=? WHERE order_id=?",
+                (json.dumps(counts), order_id),
+            )
         self.connection.commit()
         return cursor.rowcount == 1
 
@@ -77,7 +120,7 @@ class OrderDispatcher:
             self.connection.execute(
                 "UPDATE order_dispatch SET status='offered', active_user=candidate_user, "
                 "candidate_user=NULL, retry_at=NULL, offered_at=?, next_offer_at=?, "
-                "attempted_users=? WHERE order_id=?",
+                "attempted_users=?, assignment_count=assignment_count+1 WHERE order_id=?",
                 (
                     now,
                     now + SEND_CYCLE_SECONDS,
@@ -99,10 +142,10 @@ class OrderDispatcher:
         work_today: dict[str, int],
         database_busy: set[str],
         now: float,
-        accepted_order_ids: set[int] | None = None,
+        accepted_orders: dict[int, str] | None = None,
     ) -> list[DispatchAction]:
         """Synchronize new orders, expire offers, and allocate available users."""
-        accepted_order_ids = accepted_order_ids or set()
+        accepted_orders = accepted_orders or {}
         live_orders = {
             int(order_id): (str(number), int(group_id))
             for order_id, number, group_id in orders
@@ -116,15 +159,26 @@ class OrderDispatcher:
 
         for order_id in stored_ids - live_orders.keys():
             row = self.connection.execute(
-                "SELECT order_number, zone_group_id, active_user, candidate_user "
+                "SELECT order_number, zone_group_id, active_user, candidate_user, "
+                "assignment_count, rejected_counts, expired_counts "
                 "FROM order_dispatch WHERE order_id=?",
                 (order_id,),
             ).fetchone()
             if row:
                 user_topic = row[2] or row[3]
-                if order_id in accepted_order_ids:
+                if order_id in accepted_orders:
                     actions.append(
-                        DispatchAction("accepted", order_id, row[0], row[1], user_topic)
+                        DispatchAction(
+                            "accepted",
+                            order_id,
+                            row[0],
+                            row[1],
+                            user_topic,
+                            accepted_by=accepted_orders[order_id],
+                            assignment_count=int(row[4]),
+                            rejected_counts=tuple(sorted(self._decode_counts(row[5]).items())),
+                            expired_counts=tuple(sorted(self._decode_counts(row[6]).items())),
+                        )
                     )
                 elif user_topic:
                     actions.append(
@@ -139,23 +193,22 @@ class OrderDispatcher:
                 "order_number=excluded.order_number, zone_group_id=excluded.zone_group_id",
                 (order_id, number, group_id),
             )
-        for order_id in live_orders.keys() - stored_ids:
-            number, group_id = live_orders[order_id]
-            actions.append(DispatchAction("new", order_id, number, group_id))
-
         rows = self.connection.execute(
-            "SELECT order_id, order_number, zone_group_id, active_user, offered_at "
+            "SELECT order_id, order_number, zone_group_id, active_user, offered_at, expired_counts "
             "FROM order_dispatch WHERE status='offered'"
         ).fetchall()
-        for order_id, number, group_id, active_user, offered_at in rows:
+        for order_id, number, group_id, active_user, offered_at, expired_counts in rows:
             if offered_at is not None and now >= offered_at + OFFER_VISIBLE_SECONDS:
                 actions.append(
                     DispatchAction("expired", order_id, number, group_id, active_user)
                 )
+                counts = self._decode_counts(expired_counts)
+                if active_user:
+                    counts[active_user] = counts.get(active_user, 0) + 1
                 self.connection.execute(
                     "UPDATE order_dispatch SET status='pending', active_user=NULL, "
-                    "offered_at=NULL WHERE order_id=?",
-                    (order_id,),
+                    "offered_at=NULL, expired_counts=? WHERE order_id=?",
+                    (json.dumps(counts), order_id),
                 )
 
         self.connection.commit()

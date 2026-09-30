@@ -8,6 +8,24 @@ def make_dispatcher():
     return connection, OrderDispatcher(connection)
 
 
+def test_existing_dispatch_database_migrates_summary_columns():
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE order_dispatch ("
+        "order_id INTEGER PRIMARY KEY, order_number TEXT NOT NULL, "
+        "zone_group_id INTEGER NOT NULL, round_number INTEGER NOT NULL DEFAULT 1, "
+        "round_users TEXT NOT NULL DEFAULT '[]', attempted_users TEXT NOT NULL DEFAULT '[]', "
+        "status TEXT NOT NULL DEFAULT 'pending', candidate_user TEXT, retry_at REAL, "
+        "active_user TEXT, offered_at REAL, next_offer_at REAL NOT NULL DEFAULT 0)"
+    )
+
+    OrderDispatcher(connection)
+
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(order_dispatch)")}
+    assert {"assignment_count", "rejected_counts", "expired_counts"} <= columns
+    connection.close()
+
+
 def offer_actions(actions):
     return [action for action in actions if action.kind == "offer"]
 
@@ -77,7 +95,7 @@ def test_no_free_users_waits_without_completing_round():
         {"user1"},
         now=50,
     )
-    assert [action.kind for action in actions] == ["new"]
+    assert actions == []
     connection.close()
 
 
@@ -178,18 +196,6 @@ def test_order_disappearing_from_new_list_dismisses_active_overlay():
     connection.close()
 
 
-def test_new_order_action_is_emitted_only_once_while_order_is_active():
-    connection, dispatcher = make_dispatcher()
-    orders = [(1, "ORDER-1", 1)]
-
-    first = dispatcher.advance(orders, {"user1"}, {"user1": 1}, set(), now=10)
-    second = dispatcher.advance(orders, {"user1"}, {"user1": 1}, set(), now=11)
-
-    assert [action.kind for action in first].count("new") == 1
-    assert not any(action.kind == "new" for action in second)
-    connection.close()
-
-
 def test_order_transition_to_in_progress_emits_accepted_result():
     connection, dispatcher = make_dispatcher()
     first = offer_actions(
@@ -198,10 +204,44 @@ def test_order_transition_to_in_progress_emits_accepted_result():
     dispatcher.finish_publish(first, success=True, now=10)
 
     actions = dispatcher.advance(
-        [], {"user1"}, {"user1": 1}, set(), now=11, accepted_order_ids={1}
+        [], {"user1"}, {"user1": 1}, set(), now=11, accepted_orders={1: "user1"}
     )
 
-    assert [(action.kind, action.order_number, action.user_topic) for action in actions] == [
-        ("accepted", "ORDER-1", "user1")
+    assert [
+        (action.kind, action.order_number, action.user_topic, action.accepted_by,
+         action.assignment_count, action.rejected_counts, action.expired_counts)
+        for action in actions
+    ] == [
+        ("accepted", "ORDER-1", "user1", "user1", 1, (), ())
     ]
+    connection.close()
+
+
+def test_acceptance_summary_preserves_assignments_rejections_and_timeouts():
+    connection, dispatcher = make_dispatcher()
+    users = {"user1", "user2"}
+    work_today = {"user1": 1, "user2": 1}
+
+    first = offer_actions(
+        dispatcher.advance([(1, "ORDER-1", 1)], users, work_today, set(), now=10)
+    )[0]
+    dispatcher.finish_publish(first, success=True, now=10)
+    assert dispatcher.advance([(1, "ORDER-1", 1)], users, work_today, set(), now=25)[0].kind == "expired"
+
+    second = offer_actions(
+        dispatcher.advance([(1, "ORDER-1", 1)], users, work_today, set(), now=26)
+    )[0]
+    assert second.user_topic == "user2"
+    dispatcher.finish_publish(second, success=True, now=26)
+    assert dispatcher.reject(1, "user2", now=27)
+
+    summary = dispatcher.advance(
+        [], users, work_today, set(), now=28, accepted_orders={1: "user1"}
+    )[0]
+
+    assert summary.kind == "accepted"
+    assert summary.accepted_by == "user1"
+    assert summary.assignment_count == 2
+    assert summary.rejected_counts == (("user2", 1),)
+    assert summary.expired_counts == (("user1", 1),)
     connection.close()
