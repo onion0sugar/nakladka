@@ -184,3 +184,13 @@ def test_test_notification_rejects_invalid_priority():
     result = asyncio.run(main.test_notification(SimpleNamespace(), "test-topic", "urgent"))
 
     assert result == 2
+
+
+def test_response_poll_retry_delay_backs_off_up_to_one_minute():
+    delays = []
+    delay = main.RESPONSE_POLL_INTERVAL
+    for _ in range(6):
+        delay = main.next_response_retry_delay(delay)
+        delays.append(delay)
+
+    assert delays == [10.0, 20.0, 40.0, 60.0, 60.0, 60.0]

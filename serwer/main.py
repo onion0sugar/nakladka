@@ -21,6 +21,8 @@ from users import load_users
 
 logger = logging.getLogger("bot")
 RECONNECT_DELAY = 5
+RESPONSE_POLL_INTERVAL = 5.0
+RESPONSE_MAX_BACKOFF = 60.0
 DEFAULT_NEW_TEXT = "{}"
 ORDER_URL = "https://it.serwis-kop.pl/magazyn/pl/warehouse/collectingcustomerorders/view/{}"
 
@@ -96,6 +98,10 @@ async def _sleep_until(stop: asyncio.Event, seconds: float) -> None:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
     except asyncio.TimeoutError:
         pass
+
+
+def next_response_retry_delay(current_delay: float) -> float:
+    return min(max(RESPONSE_POLL_INTERVAL, current_delay * 2), RESPONSE_MAX_BACKOFF)
 
 
 async def _send_batch(ntfy: Ntfy, messages: list[tuple[str, str, str, str, str | None]]) -> None:
@@ -436,6 +442,7 @@ async def run_service(
 
     async def response_loop() -> None:
         since = str(int(time.time()))
+        retry_delay = RESPONSE_POLL_INTERVAL
         while not stop.is_set():
             try:
                 messages = await ntfy.poll_messages(cfg.response_topic, since=since, timeout=5)
@@ -473,9 +480,12 @@ async def run_service(
                         "Odrzucone zamówienie",
                         "high",
                     )
+                retry_delay = RESPONSE_POLL_INTERVAL
+                await _sleep_until(stop, RESPONSE_POLL_INTERVAL)
             except NtfyError as exc:
                 logger.error("Response topic poll failed: %s", exc)
-                await _sleep_until(stop, 1)
+                retry_delay = next_response_retry_delay(retry_delay)
+                await _sleep_until(stop, retry_delay)
 
     poll_task = asyncio.create_task(poll_loop())
     announce_task = asyncio.create_task(announce_loop())
