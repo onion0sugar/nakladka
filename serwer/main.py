@@ -435,7 +435,7 @@ async def run_service(
             dispatch_wakeup.clear()
 
     async def response_loop() -> None:
-        since = "now"
+        since = str(int(time.time()))
         while not stop.is_set():
             try:
                 messages = await ntfy.poll_messages(cfg.response_topic, since=since, timeout=5)

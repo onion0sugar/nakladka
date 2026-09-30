@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from types import SimpleNamespace
 from urllib.parse import urlencode
 from urllib import error, request
@@ -114,6 +115,8 @@ class Ntfy:
     ) -> list[dict[str, object]]:
         if not topic or any(ch.isspace() for ch in topic):
             raise NtfyError("ntfy topic nie może być pusty ani zawierać spacji")
+        if since == "now":
+            since = str(int(time.time()))
         return await asyncio.to_thread(_poll_sync, self._cfg, topic, since, timeout)
 
     async def close(self) -> None:
