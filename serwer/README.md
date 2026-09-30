@@ -87,11 +87,14 @@ Nowe zamówienia trafiają pojedynczo do dostępnych użytkowników z `users.txt
 którzy zmodyfikowali dziś co najmniej jeden dokument (`work_today_users.sql`).
 Bot czeka 15 sekund na ofertę, wysyła następną po 16 sekundach i pomija osoby,
 które mają już aktywną nakładkę lub zamówienie w toku. Supervisor dostaje
-informację po każdej pełnej rundzie oraz o odmowach.
+informację o nowym zamówieniu raz, a potem wynik próby: odmowę, wygaśnięcie
+oferty albo przyjęcie potwierdzone statusem `in_progress` w MSSQL.
 Wyjątkiem są powiadomienia „Gotowe do wydania”: użytkownik z `users.txt`, który
 ma takie zamówienie, otrzyma je również bez wpisu w `work_today_users.sql`.
-Jeśli w tym samym pollingu wykryto gotowe zamówienie, powiadomienie o nowym
-zamówieniu nie jest wysyłane. Lista z `users.txt` jest wczytywana tylko przy starcie.
+Supervisor dostaje informację o każdym zamówieniu „Gotowe do wydania” przy
+każdym poprawnym pollingu, jeśli takie zamówienie istnieje. Jeśli w tym samym
+pollingu wykryto gotowe zamówienie, zwykła oferta nowego zamówienia nie jest
+wysyłana. Lista z `users.txt` jest wczytywana tylko przy starcie.
 
 ### 5. Sprawdź konfigurację
 

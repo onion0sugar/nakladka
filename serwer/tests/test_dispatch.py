@@ -25,7 +25,7 @@ def test_offer_expires_at_15_and_next_user_receives_it_at_16_seconds():
     dispatcher.finish_publish(first_offer, success=True, now=100)
 
     actions = dispatcher.advance(orders, users, work_today, set(), now=115)
-    assert [action.kind for action in actions] == ["dismiss"]
+    assert [action.kind for action in actions] == ["expired"]
     assert dispatcher.busy_users() == set()
 
     second_offer = offer_actions(
@@ -77,7 +77,7 @@ def test_no_free_users_waits_without_completing_round():
         {"user1"},
         now=50,
     )
-    assert actions == []
+    assert [action.kind for action in actions] == ["new"]
     connection.close()
 
 
@@ -175,4 +175,33 @@ def test_order_disappearing_from_new_list_dismisses_active_overlay():
     actions = dispatcher.advance([], {"user1"}, {"user1": 1}, set(), now=11)
     assert [(action.kind, action.user_topic) for action in actions] == [("dismiss", "user1")]
     assert dispatcher.busy_users() == set()
+    connection.close()
+
+
+def test_new_order_action_is_emitted_only_once_while_order_is_active():
+    connection, dispatcher = make_dispatcher()
+    orders = [(1, "ORDER-1", 1)]
+
+    first = dispatcher.advance(orders, {"user1"}, {"user1": 1}, set(), now=10)
+    second = dispatcher.advance(orders, {"user1"}, {"user1": 1}, set(), now=11)
+
+    assert [action.kind for action in first].count("new") == 1
+    assert not any(action.kind == "new" for action in second)
+    connection.close()
+
+
+def test_order_transition_to_in_progress_emits_accepted_result():
+    connection, dispatcher = make_dispatcher()
+    first = offer_actions(
+        dispatcher.advance([(1, "ORDER-1", 1)], {"user1"}, {"user1": 1}, set(), now=10)
+    )[0]
+    dispatcher.finish_publish(first, success=True, now=10)
+
+    actions = dispatcher.advance(
+        [], {"user1"}, {"user1": 1}, set(), now=11, accepted_order_ids={1}
+    )
+
+    assert [(action.kind, action.order_number, action.user_topic) for action in actions] == [
+        ("accepted", "ORDER-1", "user1")
+    ]
     connection.close()

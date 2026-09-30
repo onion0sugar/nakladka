@@ -99,8 +99,10 @@ class OrderDispatcher:
         work_today: dict[str, int],
         database_busy: set[str],
         now: float,
+        accepted_order_ids: set[int] | None = None,
     ) -> list[DispatchAction]:
         """Synchronize new orders, expire offers, and allocate available users."""
+        accepted_order_ids = accepted_order_ids or set()
         live_orders = {
             int(order_id): (str(number), int(group_id))
             for order_id, number, group_id in orders
@@ -118,10 +120,16 @@ class OrderDispatcher:
                 "FROM order_dispatch WHERE order_id=?",
                 (order_id,),
             ).fetchone()
-            if row and (row[2] or row[3]):
-                actions.append(
-                    DispatchAction("dismiss", order_id, row[0], row[1], row[2] or row[3])
-                )
+            if row:
+                user_topic = row[2] or row[3]
+                if order_id in accepted_order_ids:
+                    actions.append(
+                        DispatchAction("accepted", order_id, row[0], row[1], user_topic)
+                    )
+                elif user_topic:
+                    actions.append(
+                        DispatchAction("dismiss", order_id, row[0], row[1], user_topic)
+                    )
             self.connection.execute("DELETE FROM order_dispatch WHERE order_id=?", (order_id,))
 
         for order_id, (number, group_id) in live_orders.items():
@@ -131,6 +139,9 @@ class OrderDispatcher:
                 "order_number=excluded.order_number, zone_group_id=excluded.zone_group_id",
                 (order_id, number, group_id),
             )
+        for order_id in live_orders.keys() - stored_ids:
+            number, group_id = live_orders[order_id]
+            actions.append(DispatchAction("new", order_id, number, group_id))
 
         rows = self.connection.execute(
             "SELECT order_id, order_number, zone_group_id, active_user, offered_at "
@@ -139,7 +150,7 @@ class OrderDispatcher:
         for order_id, number, group_id, active_user, offered_at in rows:
             if offered_at is not None and now >= offered_at + OFFER_VISIBLE_SECONDS:
                 actions.append(
-                    DispatchAction("dismiss", order_id, number, group_id, active_user)
+                    DispatchAction("expired", order_id, number, group_id, active_user)
                 )
                 self.connection.execute(
                     "UPDATE order_dispatch SET status='pending', active_user=NULL, "

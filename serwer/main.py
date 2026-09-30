@@ -23,74 +23,8 @@ logger = logging.getLogger("bot")
 RECONNECT_DELAY = 5
 RESPONSE_POLL_INTERVAL = 5.0
 RESPONSE_MAX_BACKOFF = 60.0
-DEFAULT_NEW_TEXT = "{}"
 ORDER_URL = "https://it.serwis-kop.pl/magazyn/pl/warehouse/collectingcustomerorders/view/{}"
 
-
-def build_new_order_messages(
-    orders: list[tuple[int | None, str, int | None]],
-    users: set[str],
-    work_today: dict[str, int],
-    busy: set[str],
-    supervisor_topic: str,
-) -> list[tuple[str, str, str, str, str | None]]:
-    """Zbuduj powiadomienia, wybierając najwyższą kwalifikującą się grupę."""
-    messages: list[tuple[str, str, str, str, str | None]] = []
-    notified_groups: set[int | None] = set()
-    orders_to_notify: list[tuple[int | None, str, int]] = []
-    supervisor_notifications: list[tuple[str, str | None]] = []
-    for order_id, order_number, zone_group_id in orders:
-        # `orders` są posortowane od najstarszego. Dla jednej grupy
-        # powiadamiamy tylko o pierwszym (najstarszym) zamówieniu.
-        if zone_group_id in notified_groups:
-            continue
-        notified_groups.add(zone_group_id)
-        if zone_group_id is not None:
-            orders_to_notify.append((order_id, order_number, zone_group_id))
-        click_url = ORDER_URL.format(order_id) if order_id is not None else None
-        displayed_number = f"{order_number} (grupa: {zone_group_id if zone_group_id is not None else 'brak'})"
-        text = DEFAULT_NEW_TEXT.format(displayed_number)
-        supervisor_notifications.append((text, click_url))
-        if zone_group_id is None:
-            continue
-
-    if supervisor_notifications:
-        supervisor_text = "\n".join(text for text, _click_url in supervisor_notifications)
-        supervisor_click = supervisor_notifications[0][1] if len(supervisor_notifications) == 1 else None
-        messages.append((supervisor_topic, supervisor_text, "Nowe zamówienia", "high", supervisor_click))
-
-    for login in users:
-        if login not in work_today or login in busy:
-            continue
-        eligible_order = max(
-            (order for order in orders_to_notify if order[2] <= work_today[login]),
-            key=lambda order: order[2],
-            default=None,
-        )
-        if eligible_order is None:
-            continue
-        order_id, order_number, zone_group_id = eligible_order
-        click_url = ORDER_URL.format(order_id) if order_id is not None else None
-        displayed_number = f"{order_number} (grupa: {zone_group_id})"
-        text = DEFAULT_NEW_TEXT.format(displayed_number)
-        messages.append((login, text, "Nowe zamówienie", "high", click_url))
-    return messages
-
-
-def merge_supervisor_messages(
-    messages: list[tuple[str, str, str, str, str | None]],
-    supervisor_topic: str,
-) -> list[tuple[str, str, str, str, str | None]]:
-    """Połącz wszystkie komunikaty nadzorcy w jedno powiadomienie."""
-    supervisor_messages = [message for message in messages if message[0] == supervisor_topic]
-    if len(supervisor_messages) <= 1:
-        return messages
-
-    remaining_messages = [message for message in messages if message[0] != supervisor_topic]
-    supervisor_text = "\n\n".join(message[1] for message in supervisor_messages)
-    priority = "max" if any(message[3] == "max" for message in supervisor_messages) else "high"
-    remaining_messages.append((supervisor_topic, supervisor_text, "Nowe zamówienia", priority, None))
-    return remaining_messages
 
 
 async def _sleep_until(stop: asyncio.Event, seconds: float) -> None:
@@ -170,6 +104,7 @@ async def run_service(
 
     dispatcher = OrderDispatcher(state)
     latest_orders: list[tuple[int | None, str, int | None]] = []
+    latest_accepted_order_ids: set[int] = set()
     latest_busy: set[str] = set()
     latest_work_today: dict[str, int] = {}
     latest_ready_messages: list[tuple[str, str, str, str, str | None]] = []
@@ -201,7 +136,7 @@ async def run_service(
         task.add_done_callback(background_publish_tasks.discard)
 
     async def poll_loop() -> None:
-        nonlocal db, latest_orders, latest_busy, latest_ready_messages
+        nonlocal db, latest_orders, latest_accepted_order_ids, latest_busy, latest_ready_messages
         nonlocal latest_work_today, latest_ready_targets, snapshot_at
         while not stop.is_set():
             try:
@@ -291,6 +226,13 @@ async def run_service(
                         ],
                         key=lambda order: (order[0] is None, order[0] or 0, order[1]),
                     )
+                    latest_accepted_order_ids = {
+                        row.doc_id
+                        for row in courier_rows
+                        if row.doc_id is not None
+                        and row.document_type == "7"
+                        and row.status == "in_progress"
+                    }
                     latest_work_today = work_today
                     latest_busy = (
                         set(ready_users)
@@ -309,6 +251,11 @@ async def run_service(
                     )
                     latest_ready_messages = ready_messages
                     latest_ready_targets = ready_targets
+
+                if cfg.send_text:
+                    for message in ready_messages:
+                        if message[0] == cfg.supervisor_topic:
+                            schedule_publish(*message)
 
                 snapshot_at = time.monotonic()
                 free_recipients = sum(
@@ -354,17 +301,11 @@ async def run_service(
             if stop.is_set():
                 break
 
-            messages = list(latest_ready_messages)
-            if latest_orders:
-                supervisor_orders = [
-                    message
-                    for message in build_new_order_messages(
-                        latest_orders, users, latest_work_today, latest_busy, cfg.supervisor_topic
-                    )
-                    if message[0] == cfg.supervisor_topic
-                ]
-                messages.extend(supervisor_orders)
-            messages = merge_supervisor_messages(messages, cfg.supervisor_topic)
+            messages = [
+                message
+                for message in latest_ready_messages
+                if message[0] != cfg.supervisor_topic
+            ]
             if cfg.send_text and messages:
                 await _send_batch(ntfy, messages)
 
@@ -380,13 +321,39 @@ async def run_service(
             previous_ready_targets = dict(latest_ready_targets)
 
     async def publish_dispatch_action(action: DispatchAction) -> None:
-        if action.kind == "dismiss" and action.user_topic:
-            payload = json.dumps({"type": "dismiss", "order_id": action.order_id})
-            schedule_publish(action.user_topic, payload, "Oferta zamknięta", "min")
+        if action.kind == "new":
+            if cfg.send_text:
+                click_url = ORDER_URL.format(action.order_id)
+                schedule_publish(
+                    cfg.supervisor_topic,
+                    f"Nowe zamówienie: {action.order_number} (grupa: {action.zone_group_id}).",
+                    "Nowe zamówienie",
+                    "high",
+                    click_url,
+                )
+            return
+        if action.kind in {"dismiss", "expired", "accepted"}:
+            if action.user_topic:
+                payload = json.dumps({"type": "dismiss", "order_id": action.order_id})
+                schedule_publish(action.user_topic, payload, "Oferta zamknięta", "min")
+            if action.kind == "expired":
+                schedule_publish(
+                    cfg.supervisor_topic,
+                    f"Czas minął dla oferty zamówienia {action.order_number} "
+                    f"u użytkownika {action.user_topic}; przekazuję dalej.",
+                    "Oferta wygasła",
+                    "high",
+                )
+            elif action.kind == "accepted":
+                recipient = f" przez {action.user_topic}" if action.user_topic else ""
+                schedule_publish(
+                    cfg.supervisor_topic,
+                    f"Zamówienie {action.order_number} zostało przyjęte{recipient}.",
+                    "Zamówienie przyjęte",
+                    "high",
+                )
             return
         if action.kind == "round_complete":
-            text = f"Zamówienie {action.order_number} przeszło całą kolejkę (runda {action.round_number})."
-            schedule_publish(cfg.supervisor_topic, text, "Kolejka zamówienia", "high")
             return
         if action.kind == "offer" and action.user_topic:
             try:
@@ -414,7 +381,12 @@ async def run_service(
     async def dispatch_loop() -> None:
         while not stop.is_set():
             actions = dispatcher.advance(
-                latest_orders, users, latest_work_today, latest_busy, now=time.time()
+                latest_orders,
+                users,
+                latest_work_today,
+                latest_busy,
+                now=time.time(),
+                accepted_order_ids=latest_accepted_order_ids,
             )
             offers = [action for action in actions if action.kind == "offer"]
             for action in actions:
