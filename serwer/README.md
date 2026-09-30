@@ -64,7 +64,9 @@ RESPONSE_TOPIC=order-responses
 ```
 
 `SUPERVISOR_TOPIC` odbiera komunikaty nadzorcze. Bot nasłuchuje odmów na wspólnym
-`RESPONSE_TOPIC`; aplikacja podaje ten topic w treści oferty. Topic każdego
+`RESPONSE_TOPIC`; aplikacja podaje ten topic w treści oferty. Aplikacja wysyła
+tam odpowiedzi `accept` i `reject` z identyfikatorem zamówienia i swoim topicem;
+serwer akceptuje je wyłącznie od użytkownika z aktywną ofertą. Topic każdego
 pracownika to jego login MSSQL z `users.txt`. Polecenia testowe wysyłają
 wiadomości na `SUPERVISOR_TOPIC`; można ustawić opcjonalny `TEST_TOPIC`, aby
 kierować je na osobny topic.
@@ -87,7 +89,8 @@ Nowe zamówienia trafiają pojedynczo do dostępnych użytkowników z `users.txt
 którzy zmodyfikowali dziś co najmniej jeden dokument (`work_today_users.sql`).
 Bot czeka 15 sekund na ofertę, wysyła następną po 16 sekundach i pomija osoby,
 które mają już aktywną nakładkę lub zamówienie w toku. Supervisor dostaje
-jedno podsumowanie dopiero po przyjęciu zamówienia. Zawiera przyjmującego,
+jedno podsumowanie po potwierdzeniu przyjęcia w aplikacji lub wykryciu statusu
+`in_progress` w MSSQL. Zawiera przyjmującego,
 łączną liczbę udanych przypisań oraz liczbę odmów i timeoutów per użytkownik.
 Wyjątkiem są powiadomienia „Gotowe do wydania”: użytkownik z `users.txt`, który
 ma takie zamówienie, otrzyma je również bez wpisu w `work_today_users.sql`.

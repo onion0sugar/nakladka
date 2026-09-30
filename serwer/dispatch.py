@@ -40,7 +40,7 @@ class OrderDispatcher:
             "active_user TEXT, offered_at REAL, next_offer_at REAL NOT NULL DEFAULT 0, "
             "assignment_count INTEGER NOT NULL DEFAULT 0, "
             "rejected_counts TEXT NOT NULL DEFAULT '{}', "
-            "expired_counts TEXT NOT NULL DEFAULT '{}')"
+            "expired_counts TEXT NOT NULL DEFAULT '{}', accepted_by TEXT)"
         )
         columns = {
             str(row[1]) for row in self.connection.execute("PRAGMA table_info(order_dispatch)")
@@ -56,6 +56,10 @@ class OrderDispatcher:
         if "expired_counts" not in columns:
             self.connection.execute(
                 "ALTER TABLE order_dispatch ADD COLUMN expired_counts TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "accepted_by" not in columns:
+            self.connection.execute(
+                "ALTER TABLE order_dispatch ADD COLUMN accepted_by TEXT"
             )
         self.connection.commit()
 
@@ -101,6 +105,36 @@ class OrderDispatcher:
             )
         self.connection.commit()
         return cursor.rowcount == 1
+
+    def accept(self, order_id: int, user_topic: str) -> DispatchAction | None:
+        """Confirm an offer only from its current recipient and stop dispatching it."""
+        row = self.connection.execute(
+            "SELECT order_number, zone_group_id, assignment_count, rejected_counts, expired_counts "
+            "FROM order_dispatch WHERE order_id=? AND status='offered' AND active_user=?",
+            (order_id, user_topic),
+        ).fetchone()
+        if row is None:
+            return None
+
+        cursor = self.connection.execute(
+            "UPDATE order_dispatch SET status='accepted', accepted_by=? "
+            "WHERE order_id=? AND status='offered' AND active_user=?",
+            (user_topic, order_id, user_topic),
+        )
+        self.connection.commit()
+        if cursor.rowcount != 1:
+            return None
+        return DispatchAction(
+            "accepted",
+            order_id,
+            row[0],
+            row[1],
+            user_topic,
+            accepted_by=user_topic,
+            assignment_count=int(row[2]),
+            rejected_counts=tuple(sorted(self._decode_counts(row[3]).items())),
+            expired_counts=tuple(sorted(self._decode_counts(row[4]).items())),
+        )
 
     def finish_publish(self, action: DispatchAction, success: bool, now: float) -> None:
         if action.kind != "offer" or not action.user_topic:
@@ -159,14 +193,16 @@ class OrderDispatcher:
 
         for order_id in stored_ids - live_orders.keys():
             row = self.connection.execute(
-                "SELECT order_number, zone_group_id, active_user, candidate_user, "
+                "SELECT order_number, zone_group_id, active_user, candidate_user, status, "
                 "assignment_count, rejected_counts, expired_counts "
                 "FROM order_dispatch WHERE order_id=?",
                 (order_id,),
             ).fetchone()
             if row:
                 user_topic = row[2] or row[3]
-                if order_id in accepted_orders:
+                if row[4] == "accepted":
+                    pass
+                elif order_id in accepted_orders:
                     actions.append(
                         DispatchAction(
                             "accepted",
@@ -175,9 +211,9 @@ class OrderDispatcher:
                             row[1],
                             user_topic,
                             accepted_by=accepted_orders[order_id],
-                            assignment_count=int(row[4]),
-                            rejected_counts=tuple(sorted(self._decode_counts(row[5]).items())),
-                            expired_counts=tuple(sorted(self._decode_counts(row[6]).items())),
+                            assignment_count=int(row[5]),
+                            rejected_counts=tuple(sorted(self._decode_counts(row[6]).items())),
+                            expired_counts=tuple(sorted(self._decode_counts(row[7]).items())),
                         )
                     )
                 elif user_topic:
@@ -233,7 +269,7 @@ class OrderDispatcher:
             if row is None:
                 continue
             round_number, round_users_json, attempted_json, status, candidate, retry_at, next_offer_at = row
-            if status == "offered" or now < next_offer_at:
+            if status in {"offered", "accepted"} or now < next_offer_at:
                 continue
 
             candidates = sorted(

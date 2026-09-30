@@ -418,19 +418,28 @@ async def run_service(
                         response = json.loads(raw_message)
                     except json.JSONDecodeError:
                         continue
-                    if response.get("type") != "reject":
+                    response_type = response.get("type")
+                    if response_type not in {"reject", "accept"}:
                         continue
                     try:
                         order_id = int(response["order_id"])
                         user_topic = str(response["user_topic"])
                     except (KeyError, TypeError, ValueError):
                         continue
-                    if not dispatcher.reject(order_id, user_topic, now=time.time()):
-                        logger.info("Ignoring stale rejection for order %s from %s", order_id, user_topic)
-                        continue
-                    dispatch_wakeup.set()
-                    dismissal = json.dumps({"type": "dismiss", "order_id": order_id})
-                    schedule_publish(user_topic, dismissal, "Oferta odrzucona", "min")
+                    if response_type == "reject":
+                        if not dispatcher.reject(order_id, user_topic, now=time.time()):
+                            logger.info("Ignoring stale rejection for order %s from %s", order_id, user_topic)
+                            continue
+                        dispatch_wakeup.set()
+                        dismissal = json.dumps({"type": "dismiss", "order_id": order_id})
+                        schedule_publish(user_topic, dismissal, "Oferta odrzucona", "min")
+                    else:
+                        action = dispatcher.accept(order_id, user_topic)
+                        if action is None:
+                            logger.info("Ignoring stale acceptance for order %s from %s", order_id, user_topic)
+                            continue
+                        dispatch_wakeup.set()
+                        await publish_dispatch_action(action)
                 retry_delay = RESPONSE_POLL_INTERVAL
                 await _sleep_until(stop, RESPONSE_POLL_INTERVAL)
             except NtfyError as exc:

@@ -22,7 +22,7 @@ def test_existing_dispatch_database_migrates_summary_columns():
     OrderDispatcher(connection)
 
     columns = {row[1] for row in connection.execute("PRAGMA table_info(order_dispatch)")}
-    assert {"assignment_count", "rejected_counts", "expired_counts"} <= columns
+    assert {"assignment_count", "rejected_counts", "expired_counts", "accepted_by"} <= columns
     connection.close()
 
 
@@ -244,4 +244,30 @@ def test_acceptance_summary_preserves_assignments_rejections_and_timeouts():
     assert summary.assignment_count == 2
     assert summary.rejected_counts == (("user2", 1),)
     assert summary.expired_counts == (("user1", 1),)
+    connection.close()
+
+
+def test_acceptance_is_limited_to_active_user_and_stops_dispatching():
+    connection, dispatcher = make_dispatcher()
+    users = {"user1", "user2"}
+    first = offer_actions(
+        dispatcher.advance([(1, "ORDER-1", 1)], users, {"user1": 1, "user2": 1}, set(), now=10)
+    )[0]
+    dispatcher.finish_publish(first, success=True, now=10)
+
+    assert dispatcher.accept(1, "user2") is None
+    accepted = dispatcher.accept(1, "user1")
+    assert accepted is not None
+    assert (accepted.kind, accepted.accepted_by, accepted.assignment_count) == (
+        "accepted", "user1", 1
+    )
+    assert dispatcher.advance(
+        [(1, "ORDER-1", 1)], users, {"user1": 1, "user2": 1}, set(), now=11
+    ) == []
+    assert dispatcher.busy_users() == {"user1"}
+    assert dispatcher.advance(
+        [], users, {"user1": 1, "user2": 1}, set(), now=12,
+        accepted_orders={1: "user1"},
+    ) == []
+    assert dispatcher.busy_users() == set()
     connection.close()
