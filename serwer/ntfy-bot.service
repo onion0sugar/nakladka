@@ -1,0 +1,23 @@
+[Unit]
+Description=ntfy Bot (MSSQL -> ntfy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ntfy-bot
+Group=ntfy-bot
+WorkingDirectory=/opt/ntfy-bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/ntfy-bot/.venv/bin/python /opt/ntfy-bot/main.py
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

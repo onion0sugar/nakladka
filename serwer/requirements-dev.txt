@@ -1,0 +1,3 @@
+# Zależności deweloperskie (testy)
+-r requirements.txt
+pytest>=8.2,<9

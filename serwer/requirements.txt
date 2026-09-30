@@ -1,0 +1,4 @@
+# Zależności runtime (Python 3.12+; działa na 3.14)
+pyodbc>=5.1.0,<6          # MSSQL przez ODBC Driver 18 for SQL Server
+websockets>=13.0,<16      # WebSocket do Zello (Ping/Pong automatyczny)
+python-dotenv>=1.0.1,<2   # ładowanie .env

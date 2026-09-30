@@ -1,0 +1,23 @@
+services:
+  ntfy:
+    image: binwiederhier/ntfy:latest
+    container_name: ntfy
+    command: serve
+    restart: unless-stopped
+    environment:
+      # Adres używany przez telefon i przeglądarkę.
+      NTFY_BASE_URL: "http://192.168.24.90:8093"
+      NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
+      NTFY_AUTH_DEFAULT_ACCESS: "read-write"
+      NTFY_VISITOR_REQUEST_LIMIT_BURST: "1000"
+      NTFY_VISITOR_REQUEST_LIMIT_REPLENISH: "1s"
+      NTFY_VISITOR_MESSAGE_DAILY_LIMIT: "0"
+    volumes:
+      - ./ntfy-data:/var/lib/ntfy
+    ports:
+      - "8093:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 http://localhost:80/v1/health -O - | grep -q 'true' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

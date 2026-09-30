@@ -1,0 +1,27 @@
+# Sekrety — nigdy do repozytorium
+.env
+users.txt
+testusers.txt
+*.state.db
+users.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+.pytest-tmp/
+state.db
+ntfy-data/
+bot-data/
+.pytest-tmp/
+state.db
+ntfy-data/
+bot-data/
+REASONIX.md
+# System
+.DS_Store
+*.log
+mailer.py
