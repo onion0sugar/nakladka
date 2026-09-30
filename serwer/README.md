@@ -118,7 +118,7 @@ W `testusers.txt` wpisz jeden topic ntfy w każdym wierszu. Testowi odbiorcy są
 traktowani jako aktywni i dostępni dla wszystkich aktualnych grup. Pętla nadal
 odczytuje prawdziwe zamówienia z MSSQL, więc ich numery i linki trafią na topiki
 testowe. Stan dispatchera, topic odpowiedzi i topic nadzorczy są oddzielone od
-produkcji (`testusers.txt.state.db`, `TEST_RESPONSE_TOPIC`,
+produkcji (`~/.local/state/nakladka/testusers.db`, `TEST_RESPONSE_TOPIC`,
 `TEST_SUPERVISOR_TOPIC`). Proces pozostaje uruchomiony do `Ctrl+C`.
 
 Jeśli testy zakończą się poprawnie, uruchom bota:
