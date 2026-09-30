@@ -9,6 +9,7 @@ import signal
 import sys
 import time
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 from config import ConfigError, load_config
@@ -119,6 +120,12 @@ def test_mode_work_today(users: set[str], courier_rows) -> dict[str, int]:
     return {topic: max_group for topic in users}
 
 
+def build_test_state_path(test_users_file: str, home: Path | None = None) -> Path:
+    state_dir = (home or Path.home()) / ".local" / "state" / "nakladka"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return state_dir / f"{Path(test_users_file).stem}.db"
+
+
 async def run_service(
     cfg: SimpleNamespace,
     stop: asyncio.Event | None = None,
@@ -135,7 +142,7 @@ async def run_service(
         cfg = SimpleNamespace(**vars(cfg))
         cfg.supervisor_topic = cfg.test_supervisor_topic
         cfg.response_topic = cfg.test_response_topic
-        cfg.state_file = f"{test_users_file}.state.db"
+        cfg.state_file = str(build_test_state_path(test_users_file))
     users = load_users(test_users_file if test_mode else cfg.users_file)
     if test_mode:
         logger.warning(

@@ -173,6 +173,13 @@ def test_test_mode_work_today_makes_file_users_available_for_all_order_groups():
     }
 
 
+def test_test_mode_state_is_created_under_user_home(tmp_path):
+    state_path = main.build_test_state_path("/opt/nakladka/serwer/testusers.txt", tmp_path)
+
+    assert state_path == tmp_path / ".local" / "state" / "nakladka" / "testusers.db"
+    assert state_path.parent.is_dir()
+
+
 def test_test_notification_rejects_invalid_priority():
     result = asyncio.run(main.test_notification(SimpleNamespace(), "test-topic", "urgent"))
 
