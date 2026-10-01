@@ -3,6 +3,18 @@ import logging
 from types import SimpleNamespace
 
 import main
+from state import acknowledge_ready_order, clear_ready_acknowledgement, load_ready_acknowledgements, open_state
+
+
+def test_ready_acknowledgement_is_persisted_until_cleared():
+    connection = open_state(":memory:")
+
+    acknowledge_ready_order(connection, 42, "picker")
+    assert load_ready_acknowledgements(connection) == {42: "picker"}
+
+    clear_ready_acknowledgement(connection, 42)
+    assert load_ready_acknowledgements(connection) == {}
+    connection.close()
 
 
 def test_send_batch_publishes_notifications_sequentially(caplog):

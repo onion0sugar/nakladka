@@ -16,7 +16,13 @@ from config import ConfigError, load_config
 from db import COURIER_QUERY_FILE, READY_USERS_QUERY_FILE, WORK_TODAY_USERS_QUERY_FILE, DbError, connect_db, fetch_courier_rows, fetch_top_ready_user, fetch_work_today_users, load_query
 from dispatch import DispatchAction, OrderDispatcher, SEND_CYCLE_SECONDS
 from ntfy import Ntfy, NtfyError
-from state import courier_changed, open_state
+from state import (
+    acknowledge_ready_order,
+    clear_ready_acknowledgement,
+    courier_changed,
+    load_ready_acknowledgements,
+    open_state,
+)
 from users import load_users
 
 logger = logging.getLogger("bot")
@@ -110,6 +116,7 @@ async def run_service(
     latest_ready_messages: list[tuple[str, str, str, str, str | None]] = []
     latest_ready_targets: dict[int, str] = {}
     previous_ready_targets: dict[int, str] = {}
+    acknowledged_ready_targets = load_ready_acknowledgements(state)
     snapshot_at = 0.0
     poll_finished = asyncio.Event()
     poll_updated = asyncio.Event()
@@ -151,6 +158,7 @@ async def run_service(
                     )
                     ready_messages: list[tuple[str, str, str, str, str | None]] = []
                     ready_targets: dict[int, str] = {}
+                    current_ready_owners: dict[int, str] = {}
                     ready_users: set[str] = set()
                     for row in courier_rows:
                         if row.doc_id is not None:
@@ -172,19 +180,22 @@ async def run_service(
                                 click_url = ORDER_URL.format(row.doc_id)
                                 if test_user:
                                     ready_users.add(test_user)
+                                    current_ready_owners[row.doc_id] = test_user
                                     ready_targets[row.doc_id] = test_user
-                                    ready_payload = json.dumps(
-                                        {
-                                            "type": "ready",
-                                            "order_id": row.doc_id,
-                                            "text": ready_text,
-                                            "click_url": click_url,
-                                        },
-                                        ensure_ascii=False,
-                                    )
-                                    ready_messages.append(
-                                        (test_user, ready_payload, "Gotowe do wydania", "max", click_url)
-                                    )
+                                    if acknowledged_ready_targets.get(row.doc_id) != test_user:
+                                        ready_payload = json.dumps(
+                                            {
+                                                "type": "ready",
+                                                "order_id": row.doc_id,
+                                                "text": ready_text,
+                                                "click_url": click_url,
+                                                "response_topic": cfg.response_topic,
+                                            },
+                                            ensure_ascii=False,
+                                        )
+                                        ready_messages.append(
+                                            (test_user, ready_payload, "Gotowe do wydania", "max", click_url)
+                                        )
                                 ready_messages.append(
                                     (cfg.supervisor_topic, ready_text, "Gotowe do wydania", "max", click_url)
                                 )
@@ -195,26 +206,33 @@ async def run_service(
                             click_url = ORDER_URL.format(top_user[2]) if top_user else None
                             if top_user:
                                 ready_users.add(top_user[0])
+                                current_ready_owners[row.doc_id] = top_user[0]
                                 ready_text += "\n" + "\n".join(
                                     f"{login} ({count})" for login, count, _document_id in top_users
                                 )
                                 if top_user[0] in users:
                                     ready_targets[row.doc_id] = top_user[0]
-                                    ready_payload = json.dumps(
-                                        {
-                                            "type": "ready",
-                                            "order_id": row.doc_id,
-                                            "text": ready_text,
-                                            "click_url": click_url,
-                                        },
-                                        ensure_ascii=False,
-                                    )
-                                    ready_messages.append(
-                                        (top_user[0], ready_payload, "Gotowe do wydania", "max", click_url)
-                                    )
+                                    if acknowledged_ready_targets.get(row.doc_id) != top_user[0]:
+                                        ready_payload = json.dumps(
+                                            {
+                                                "type": "ready",
+                                                "order_id": row.doc_id,
+                                                "text": ready_text,
+                                                "click_url": click_url,
+                                                "response_topic": cfg.response_topic,
+                                            },
+                                            ensure_ascii=False,
+                                        )
+                                        ready_messages.append(
+                                            (top_user[0], ready_payload, "Gotowe do wydania", "max", click_url)
+                                        )
                             ready_messages.append(
                                 (cfg.supervisor_topic, ready_text, "Gotowe do wydania", "max", click_url)
                             )
+                    for order_id, acknowledged_user in tuple(acknowledged_ready_targets.items()):
+                        if current_ready_owners.get(order_id) != acknowledged_user:
+                            acknowledged_ready_targets.pop(order_id, None)
+                            clear_ready_acknowledgement(state, order_id)
                     latest_orders = sorted(
                         [
                             (row.doc_id, row.number, row.zone_group_id)
@@ -419,12 +437,25 @@ async def run_service(
                     except json.JSONDecodeError:
                         continue
                     response_type = response.get("type")
-                    if response_type not in {"reject", "accept"}:
+                    if response_type not in {"reject", "accept", "ready_opened"}:
                         continue
                     try:
                         order_id = int(response["order_id"])
                         user_topic = str(response["user_topic"])
                     except (KeyError, TypeError, ValueError):
+                        continue
+                    if response_type == "ready_opened":
+                        if latest_ready_targets.get(order_id) != user_topic:
+                            logger.info(
+                                "Ignoring stale ready acknowledgment for order %s from %s",
+                                order_id,
+                                user_topic,
+                            )
+                            continue
+                        acknowledged_ready_targets[order_id] = user_topic
+                        acknowledge_ready_order(state, order_id, user_topic)
+                        dismissal = json.dumps({"type": "dismiss", "order_id": order_id})
+                        schedule_publish(user_topic, dismissal, "Zamówienie otwarte", "min")
                         continue
                     if response_type == "reject":
                         if not dispatcher.reject(order_id, user_topic, now=time.time()):

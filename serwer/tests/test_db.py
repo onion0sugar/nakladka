@@ -135,6 +135,15 @@ def test_load_query_accepts_select_with_cte(tmp_path):
     assert load_query(str(path)).startswith(";WITH")
 
 
+def test_ready_users_query_ranks_total_positions_per_user():
+    query = load_query(db.READY_USERS_QUERY_FILE)
+
+    assert "SUM(PS.PackagedPositionCount) AS PackagedPositionCount" in query
+    assert "MAX(DD.Id) AS Id" in query
+    assert "GROUP BY COALESCE(CU.UserName, CONVERT(nvarchar(255), DD.ModifiedBy))" in query
+    assert "GROUP BY COALESCE(CU.UserName, CONVERT(nvarchar(255), DD.ModifiedBy)), DD.Id" not in query
+
+
 # --- zapytanie -------------------------------------------------------------------
 
 
